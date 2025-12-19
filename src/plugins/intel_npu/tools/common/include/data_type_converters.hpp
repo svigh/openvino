@@ -110,7 +110,7 @@ enable_t<OutT, std::is_integral<InT>, std::is_unsigned<InT>, std::is_integral<Ou
 template <typename OutT, typename InT>
 enable_t<OutT, std::is_integral<InT>, std::is_signed<InT>, std::is_integral<OutT>, std::is_unsigned<OutT>> checked_cast(
         InT value) {
-    OPENVINO_ASSERT(value >= 0, "Can not safely cast ", static_cast<int64_t>(value), " from ", ov::element::from<InT>(),
+    OPENVINO_ASSERT(value >= static_cast<InT>(0), "Can not safely cast ", static_cast<int64_t>(value), " from ", ov::element::from<InT>(),
                     " to ", ov::element::from<OutT>());
 
     details::staticIf<details::Greater(static_cast<std::make_unsigned_t<InT>>(std::numeric_limits<InT>::max()),

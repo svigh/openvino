@@ -1025,7 +1025,7 @@ std::map<std::string, std::string> parseConfigFile() {
                             "An invalid config parameter value detected, it mustn't be empty: ", option);
             size_t valueEnd = option.find_last_not_of(" \t\n\r");
             value = option.substr(valueStart, valueEnd - valueStart + 1);
-            config[key] = value;
+            config[key] = std::move(value);
         }
     }
 
@@ -1847,6 +1847,9 @@ std::vector<Detection> parseDetectionsFromOutputs(const TensorMap& outputs, floa
         }
 
         // Confidence is the softmax probability of the best class
+        if (exp_sum == 0.0f) {
+            exp_sum = std::numeric_limits<float>::epsilon();
+        }
         float confidence = 1.0f / exp_sum;
 
         // Filter by confidence threshold
@@ -2294,7 +2297,7 @@ const char TEMPLATE_LIB[] = "libopenvino_template_plugin.so";
 #endif
 
 void setupOVCore(ov::Core& core) {
-    auto flagDevice = FLAGS_device;
+    const auto& flagDevice = FLAGS_device;
 
     if (FLAGS_device == "TEMPLATE") {
         core.register_plugin(TEMPLATE_LIB, FLAGS_device);
@@ -2383,8 +2386,8 @@ bool testSSDDetection(const TensorMap& outputs, const TensorMap& references,
         auto parsedOutput = utils::parseSSDOutput(outputTensor, imgWidth, imgHeight, static_cast<float>(confThresh));
         auto parsedReference =
             utils::parseSSDOutput(referenceTensor, imgWidth, imgHeight, static_cast<float>(confThresh));
-        return checkBBoxOutputs(parsedOutput,
-                                parsedReference,
+        return checkBBoxOutputs(std::move(parsedOutput),
+                                std::move(parsedReference),
                                 imgWidth,
                                 imgHeight,
                                 static_cast<float>(boxTolerance),
@@ -2431,8 +2434,8 @@ bool testYoloV2(const TensorMap& outputs, const TensorMap& references, const Ten
                                                       imgHeight,
                                                       static_cast<float>(confThresh),
                                                       isTiny);
-        return checkBBoxOutputs(parsedOutput,
-                                parsedReference,
+        return checkBBoxOutputs(std::move(parsedOutput),
+                                std::move(parsedReference),
                                 imgWidth,
                                 imgHeight,
                                 static_cast<float>(boxTolerance),
@@ -2952,8 +2955,8 @@ static int runSingleImageTest() {
         }
 
         for (size_t numberOfTestCase = 0; numberOfTestCase < inputFilesPerCase.size(); ++numberOfTestCase) {
-            const auto inputsInfo = compiledModel.inputs();
-            const auto outputsInfo = compiledModel.outputs();
+            const auto& inputsInfo = compiledModel.inputs();
+            const auto& outputsInfo = compiledModel.outputs();
             const FilesForModelInputs &inputFiles = inputFilesForOneInfer[numberOfTestCase];
             OPENVINO_ASSERT(inputFiles.size() == inputsInfo.size(), "Number of input files ", inputFiles.size(),
                             " doesn't match network configuration ", inputsInfo.size());
@@ -3026,7 +3029,7 @@ static int runSingleImageTest() {
             auto outInference = runInfer(inferRequest, compiledModel, inTensors, dumpedInputsPaths);
             const auto endTime = Time::now();
 
-            TensorMap& outputTensors = outInference.first;
+            TensorMap& outputTensors = std::move(outInference.first);
 
             printPerformanceCountsAndLatency(numberOfTestCase, outInference.second, endTime - startTime);
 
