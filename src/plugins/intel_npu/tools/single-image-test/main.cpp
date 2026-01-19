@@ -1368,6 +1368,7 @@ std::vector<std::vector<std::pair<int, float>>> parseClassificationBatch(const o
 
     const float* dataBuffer = tensor.data<const float>();
     OPENVINO_ASSERT(dataBuffer != nullptr, "Received a tensor with no allocated buffer");
+    OPENVINO_ASSERT(batch_size != 0, "Batch size cannot be zero");
 
     size_t batch_bundle_size = tensor.get_size() / batch_size;
     OPENVINO_ASSERT(!(tensor.get_size() % batch_bundle_size),
@@ -2220,8 +2221,8 @@ bool testPSNR(const TensorMap& outputs, const TensorMap& references, const int d
     OPENVINO_ASSERT(outputs.size() == references.size(),
                     "Mismatch between the number of model outputs and the number of references");
 
-    int scaleBorder = FLAGS_scale_border;
-    bool normalizedImage = FLAGS_normalized_image;
+    const int scaleBorder = FLAGS_scale_border;
+    const bool normalizedImage = FLAGS_normalized_image;
 
     auto refOutput = npu::utils::parseTensorsAsFP32(references);
     auto actOutput = npu::utils::parseTensorsAsFP32(outputs);
@@ -2470,9 +2471,9 @@ bool testYoloV3(const TensorMap& outputs, const TensorMap& references, const Ten
     std::vector<float> anchors = {10.0, 13.0, 16.0,  30.0,  33.0, 23.0,  30.0,  61.0,  62.0,
                                   45.0, 59.0, 119.0, 116.0, 90.0, 156.0, 198.0, 373.0, 326.0};
 
-    auto parsedOutput = utils::parseYoloV3Output(outputs, imgWidth, imgHeight, classes, coords, num, anchors,
+    const auto parsedOutput = utils::parseYoloV3Output(outputs, imgWidth, imgHeight, classes, coords, num, anchors,
                                                  static_cast<float>(confThresh), transformLayoutDescriptionToAnyLayoutsMap(outputLayouts));
-    auto parsedReference = utils::parseYoloV3Output(references, imgWidth, imgHeight, classes, coords, num, anchors,
+    const auto parsedReference = utils::parseYoloV3Output(references, imgWidth, imgHeight, classes, coords, num, anchors,
                                                     static_cast<float>(confThresh), transformLayoutDescriptionToAnyLayoutsMap(outputLayouts));
 
     bool result = checkBBoxOutputs(parsedOutput, parsedReference, imgWidth, imgHeight, static_cast<float>(boxTolerance),
@@ -2534,8 +2535,8 @@ bool testYoloV4(const TensorMap& outputs, const TensorMap& references, const Ten
                                               masked_anchors,
                                               static_cast<float>(confThresh),
                                               transformLayoutDescriptionToAnyLayoutsMap(outputLayouts));
-    bool result = checkBBoxOutputs(actOutput,
-                                   refOutput,
+    bool result = checkBBoxOutputs(std::move(actOutput),
+                                   std::move(refOutput),
                                    imgWidth,
                                    imgHeight,
                                    static_cast<float>(boxTolerance),
