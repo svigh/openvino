@@ -78,6 +78,32 @@ std::string TagsManager::add(const std::string& tag) {
     return t;
 }
 
+// Error collector to accumulate validation errors instead of failing fast
+class ErrorCollector {
+public:
+    void addError(const std::string& error) {
+        m_errors.push_back(error);
+    }
+
+    bool hasErrors() const {
+        return !m_errors.empty();
+    }
+
+    std::vector<std::string> getErrors() const {
+        return m_errors;
+    }
+
+    void clear() {
+        m_errors.clear();
+    }
+
+private:
+    std::vector<std::string> m_errors;
+};
+
+// Thread-local error collector
+thread_local ErrorCollector g_error_collector;
+
 static LogLevel toLogLevel(const std::string& lvl) {
     if (lvl == "NONE")
         return LogLevel::None;
@@ -85,19 +111,38 @@ static LogLevel toLogLevel(const std::string& lvl) {
         return LogLevel::Info;
     if (lvl == "DEBUG")
         return LogLevel::Debug;
-    THROW_ERROR("Unsupported log level: " << lvl);
+    std::ostringstream os;
+    os << "Unsupported log level: " << lvl << " (valid options: NONE, INFO, DEBUG)";
+    g_error_collector.addError(os.str());
+    return LogLevel::None;  // Return default value
 }
 
 static int toDepth(const std::string& prec) {
-    if (prec == "FP32")
-        return CV_32F;
-    if (prec == "FP16")
-        return CV_16F;
-    if (prec == "U8")
-        return CV_8U;
-    if (prec == "I32" || prec == "I64")
-        return CV_32S;
-    throw std::logic_error("Unsupported precision type: " + prec);
+    const auto supportedPrecisionStrings = std::vector<std::string>{"FP32", "FP16", "U8", "I32", "I64"};
+
+    const auto precisionStringToDepthMap = std::map<std::string, int>{
+        {"FP32", CV_32F},
+        {"FP16", CV_16F},
+        {"U8", CV_8U},
+        {"I32", CV_32S},
+        {"I64", CV_32S},
+    };
+
+    if (std::find(supportedPrecisionStrings.begin(), supportedPrecisionStrings.end(), prec) !=
+        supportedPrecisionStrings.end()) {
+        return precisionStringToDepthMap.at(prec);
+    }
+
+    std::ostringstream validOptions;
+    for (const auto& s : supportedPrecisionStrings) {
+        validOptions << s << ", ";
+    }
+
+    const std::string validOptionsStr = validOptions.str().substr(0, validOptions.str().size() - 2);
+
+    g_error_collector.addError("Unsupported precision type: " + prec + " (valid options: " + validOptionsStr + ")");
+
+    return CV_32F;  // Return default value
 }
 
 static AttrMap<int> toDepth(const AttrMap<std::string>& attrmap) {
@@ -128,7 +173,8 @@ static std::string toPriority(const std::string& priority) {
     if (priority == "HIGH") {
         return "HIGH";
     }
-    throw std::logic_error("Unsupported model priority: " + priority);
+    g_error_collector.addError("Unsupported model priority: " + priority + " (valid options: LOW, NORMAL, HIGH)");
+    return "MEDIUM";  // Return default value
 }
 
 static ScenarioGraph buildGraph(const std::vector<OpDesc>& op_descs,
@@ -192,10 +238,12 @@ template <>
 struct convert<UniformGenerator::Ptr> {
     static bool decode(const Node& node, UniformGenerator::Ptr& generator) {
         if (!node["low"]) {
-            THROW_ERROR("Uniform distribution must have \"low\" attribute");
+            g_error_collector.addError("Uniform distribution must have \"low\" attribute");
+            return false;
         }
         if (!node["high"]) {
-            THROW_ERROR("Uniform distribution must have \"high\" attribute");
+            g_error_collector.addError("Uniform distribution must have \"high\" attribute");
+            return false;
         }
         int seed = node["seed"] ? node["seed"].as<int>() : 0xffffffff;
         generator = std::make_shared<UniformGenerator>(node["low"].as<double>(), node["high"].as<double>(), seed);
@@ -207,13 +255,17 @@ template <>
 struct convert<IRandomGenerator::Ptr> {
     static bool decode(const Node& node, IRandomGenerator::Ptr& generator) {
         if (!node["dist"]) {
-            THROW_ERROR("\"random\" must have \"dist\" attribute!");
+            g_error_collector.addError("\"random\" must have \"dist\" attribute!");
+            return false;
         }
         const auto dist = node["dist"].as<std::string>();
         if (dist == "uniform") {
             generator = node.as<UniformGenerator::Ptr>();
         } else {
-            THROW_ERROR("Unsupported random distribution: \"" << dist << "\"");
+            std::ostringstream os;
+            os << "Unsupported random distribution: \"" << dist << "\" (valid options: uniform)";
+            g_error_collector.addError(os.str());
+            return false;
         }
         return true;
     }
@@ -224,7 +276,8 @@ struct convert<Norm::Ptr> {
     static bool decode(const Node& node, Norm::Ptr& metric) {
         // NB: If bigger than tolerance - fail.
         if (!node["tolerance"]) {
-            THROW_ERROR("Metric \"norm\" must have \"tolerance\" attribute!");
+            g_error_collector.addError("Metric \"norm\" must have \"tolerance\" attribute!");
+            return false;
         }
         const auto tolerance = node["tolerance"].as<double>();
         metric = std::make_shared<Norm>(tolerance);
@@ -237,7 +290,8 @@ struct convert<Cosine::Ptr> {
     static bool decode(const Node& node, Cosine::Ptr& metric) {
         // NB: If lower than threshold - fail.
         if (!node["threshold"]) {
-            THROW_ERROR("Metric \"cosine\" must have \"threshold\" attribute!");
+            g_error_collector.addError("Metric \"cosine\" must have \"threshold\" attribute!");
+            return false;
         }
         const auto threshold = node["threshold"].as<double>();
         metric = std::make_shared<Cosine>(threshold);
@@ -250,7 +304,8 @@ struct convert<NRMSE::Ptr> {
     static bool decode(const Node& node, NRMSE::Ptr& metric) {
         // NB: If bigger than tolerance - fail.
         if (!node["tolerance"]) {
-            THROW_ERROR("Metric \"nrmse\" must have \"tolerance\" attribute!");
+            g_error_collector.addError("Metric \"nrmse\" must have \"tolerance\" attribute!");
+            return false;
         }
         const auto tolerance = node["tolerance"].as<double>();
         metric = std::make_shared<NRMSE>(tolerance);
@@ -269,7 +324,10 @@ struct convert<IAccuracyMetric::Ptr> {
         } else if (type == "nrmse") {
             metric = node.as<NRMSE::Ptr>();
         } else {
-            THROW_ERROR("Unsupported metric type: " << type);
+            std::ostringstream os;
+            os << "Unsupported metric type: " << type << " (valid options: norm, cosine, nrmse)";
+            g_error_collector.addError(os.str());
+            return false;
         }
         return true;
     }
@@ -280,16 +338,18 @@ struct convert<GlobalOptions> {
     static bool decode(const Node& node, GlobalOptions& opts) {
         if (node["model_dir"]) {
             if (!node["model_dir"]["local"]) {
-                THROW_ERROR("\"model_dir\" must contain \"local\" key!");
+                g_error_collector.addError("\"model_dir\" must contain \"local\" key!");
+            } else {
+                opts.model_dir = node["model_dir"]["local"].as<std::string>();
             }
-            opts.model_dir = node["model_dir"]["local"].as<std::string>();
         }
 
         if (node["blob_dir"]) {
             if (!node["blob_dir"]["local"]) {
-                THROW_ERROR("\"blob_dir\" must contain \"local\" key!");
+                g_error_collector.addError("\"blob_dir\" must contain \"local\" key!");
+            } else {
+                opts.blob_dir = node["blob_dir"]["local"].as<std::string>();
             }
-            opts.blob_dir = node["blob_dir"]["local"].as<std::string>();
         }
 
         if (node["device_name"]) {
@@ -393,7 +453,7 @@ struct convert<ONNXRTParams::OpenVINO> {
             std::string device_type = node["device_type"].as<std::string>();
             // Check if device_type already exists in params_map (collision check)
             if (ov_ep.params_map.count("device_type") > 0) {
-                THROW_ERROR("Configuration error: 'device_type' has already been specified in the params.");
+                g_error_collector.addError("Configuration error: 'device_type' has already been specified in the params.");
             } else {
                 ov_ep.params_map["device_type"] = device_type;
             }
@@ -409,7 +469,10 @@ struct convert<ONNXRTParams::EP> {
         if (ep_name == "OV") {
             ep = node.as<ONNXRTParams::OpenVINO>();
         } else {
-            THROW_ERROR("Unsupported \"ep name\" value: " << ep_name);
+            std::ostringstream os;
+            os << "Unsupported \"ep name\" value: " << ep_name << " (valid options: OV)";
+            g_error_collector.addError(os.str());
+            return false;
         }
         return true;
     }
@@ -448,7 +511,9 @@ struct convert<Network> {
         } else if (framework == "onnxrt") {
             network.params = node.as<ONNXRTParams>();
         } else {
-            THROW_ERROR("Unsupported \"framework:\" value: " << framework);
+            std::ostringstream os;
+            os << "Unsupported \"framework:\" value: " << framework << " (valid options: openvino, onnxrt)";
+            g_error_collector.addError(os.str());
         }
 
         if (node["random"]) {
@@ -487,7 +552,9 @@ struct convert<InferOp> {
         } else if (framework == "onnxrt") {
             op.params = node.as<ONNXRTParams>();
         } else {
-            THROW_ERROR("Unsupported \"framework:\" value: " << framework);
+            std::ostringstream os;
+            os << "Unsupported \"framework:\" value: " << framework << " (valid options: openvino, onnxrt)";
+            g_error_collector.addError(os.str());
         }
 
         if (node["random"]) {
@@ -536,7 +603,9 @@ struct convert<OpDesc> {
             }
             opdesc.op = CompoundOp{repeat_count, std::move(inference_params), buildGraph(op_descs, connections)};
         } else {
-            THROW_ERROR("Unsupported operation type: \"" << type << "\"!");
+            std::ostringstream os;
+            os << "Unsupported operation type: \"" << type << "\"! (valid options: Infer, CPU, Compound)";
+            g_error_collector.addError(os.str());
         }
         return true;
     }
@@ -659,8 +728,10 @@ static StreamDesc parseStream(const YAML::Node& node, const GlobalOptions& opts,
     if (node["frames_interval_in_ms"]) {
         stream.frames_interval_in_us = node["frames_interval_in_ms"].as<uint32_t>() * 1000u;
         if (node["target_fps"]) {
-            THROW_ERROR("Both \"target_fps\" and \"frames_interval_in_ms\" are defined for the stream: \""
-                        << stream.name << "\"! Please specify only one of them as they are mutually exclusive.");
+            std::ostringstream os;
+            os << "Both \"target_fps\" and \"frames_interval_in_ms\" are defined for the stream: \""
+               << stream.name << "\"! Please specify only one of them as they are mutually exclusive.";
+            g_error_collector.addError(os.str());
         }
     } else if (node["target_fps"]) {
         uint32_t target_fps = node["target_fps"].as<uint32_t>();
@@ -670,7 +741,9 @@ static StreamDesc parseStream(const YAML::Node& node, const GlobalOptions& opts,
     if (node["target_latency_in_ms"]) {
         stream.target_latency = std::make_optional(node["target_latency_in_ms"].as<double>());
         if (stream.target_latency < 0) {
-            THROW_ERROR("\"target_latency_in_ms\" is negative for the stream: \"" << stream.name << "\"!");
+            std::ostringstream os;
+            os << "\"target_latency_in_ms\" is negative for the stream: \"" << stream.name << "\"!";
+            g_error_collector.addError(os.str());
         }
     }
     if (node["exec_time_in_secs"]) {
@@ -737,23 +810,32 @@ static ScenarioGraph buildGraph(const std::vector<OpDesc>& op_descs,
     // (2) Go though connections and create the dependency map
     for (const auto& tags : connections) {
         if (tags.size() < 2) {
-            THROW_ERROR("Connections list must be at least size of 2!");
+            g_error_collector.addError("Connections list must be at least size of 2!");
+            continue;
         }
         for (uint32_t i = 1; i < tags.size(); ++i) {
             // [A, B, C] - means B depends on A, and C depends on B
             auto deps_it = dependency_map.find(tags[i]);
             if (deps_it == dependency_map.end()) {
-                THROW_ERROR("Operation \"" << tags[i] << "\" hasn't been registered in op_desc list!");
+                std::ostringstream os;
+                os << "Operation \"" << tags[i] << "\" hasn't been registered in op_desc list!";
+                g_error_collector.addError(os.str());
+                continue;
             }
             if (tags[i - 1] == tags[i]) {
-                THROW_ERROR("Operation \"" << tags[i] << "\" cannot be connected with itself!");
+                std::ostringstream os;
+                os << "Operation \"" << tags[i] << "\" cannot be connected with itself!";
+                g_error_collector.addError(os.str());
+                continue;
             }
             auto& dep_set = deps_it->second;
             // NB: Check if such connection already exists
             auto is_inserted = deps_it->second.emplace(tags[i - 1]).second;
             if (!is_inserted) {
-                THROW_ERROR("Connection between \"" << tags[i - 1] << "\" and \"" << tags[i]
-                                                    << "\" operations already exists!");
+                std::ostringstream os;
+                os << "Connection between \"" << tags[i - 1] << "\" and \"" << tags[i]
+                   << "\" operations already exists!";
+                g_error_collector.addError(os.str());
             }
         }
     }
@@ -785,8 +867,10 @@ static StreamDesc parseAdvancedStream(const YAML::Node& node, const GlobalOption
     if (node["frames_interval_in_ms"]) {
         stream.frames_interval_in_us = node["frames_interval_in_ms"].as<uint32_t>() * 1000u;
         if (node["target_fps"]) {
-            THROW_ERROR("Both \"target_fps\" and \"frames_interval_in_ms\" are defined for the stream: \""
-                        << stream.name << "\"! Please specify only one of them as they are mutually exclusive.");
+            std::ostringstream os;
+            os << "Both \"target_fps\" and \"frames_interval_in_ms\" are defined for the stream: \""
+               << stream.name << "\"! Please specify only one of them as they are mutually exclusive.";
+            g_error_collector.addError(os.str());
         }
     } else if (node["target_fps"]) {
         uint32_t target_fps = node["target_fps"].as<uint32_t>();
@@ -796,7 +880,9 @@ static StreamDesc parseAdvancedStream(const YAML::Node& node, const GlobalOption
     if (node["target_latency_in_ms"]) {
         stream.target_latency = std::make_optional(node["target_latency_in_ms"].as<double>());
         if (stream.target_latency < 0) {
-            THROW_ERROR("\"target_latency_in_ms\" is negative for the stream: \"" << stream.name << "\"!");
+            std::ostringstream os;
+            os << "\"target_latency_in_ms\" is negative for the stream: \"" << stream.name << "\"!";
+            g_error_collector.addError(os.str());
         }
     }
     if (node["exec_time_in_secs"]) {
@@ -873,6 +959,9 @@ static std::vector<ScenarioDesc> parseScenarios(const YAML::Node& node, const Gl
 }
 
 Config parseConfig(const YAML::Node& node, const ReplaceBy& replace_by) {
+    // Clear any previous errors
+    g_error_collector.clear();
+
     const auto global_opts = node.as<GlobalOptions>();
 
     // FIXME: Perhaps should be done somewhere else...
@@ -893,5 +982,18 @@ Config parseConfig(const YAML::Node& node, const ReplaceBy& replace_by) {
     if (node["disable_high_resolution_waitable_timer"]) {
         config.disable_high_resolution_timer = node["disable_high_resolution_waitable_timer"].as<bool>();
     }
+
+    // Check if any errors were collected during parsing
+    if (g_error_collector.hasErrors()) {
+        std::ostringstream error_msg;
+        error_msg << "Configuration parsing failed with the following errors:\\n";
+        const auto errors = g_error_collector.getErrors();
+        for (size_t i = 0; i < errors.size(); ++i) {
+            error_msg << "  " << (i + 1) << ". " << errors[i] << "\\n";
+        }
+        error_msg << "\\nTotal errors: " << errors.size();
+        THROW_ERROR(error_msg.str());
+    }
+
     return config;
 }
