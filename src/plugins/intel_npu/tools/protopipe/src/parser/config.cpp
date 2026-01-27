@@ -78,7 +78,8 @@ std::string TagsManager::add(const std::string& tag) {
     return t;
 }
 
-// Error collector to accumulate validation errors instead of failing fast
+namespace {
+
 class ErrorCollector {
 public:
     void addError(const std::string& error) {
@@ -101,8 +102,9 @@ private:
     std::vector<std::string> m_errors;
 };
 
-// Thread-local error collector
-thread_local ErrorCollector g_error_collector;
+static ErrorCollector g_error_collector;
+
+}  // anonymous namespace
 
 static LogLevel toLogLevel(const std::string& lvl) {
     if (lvl == "NONE")
@@ -111,13 +113,14 @@ static LogLevel toLogLevel(const std::string& lvl) {
         return LogLevel::Info;
     if (lvl == "DEBUG")
         return LogLevel::Debug;
+
     std::ostringstream os;
     os << "Unsupported log level: " << lvl << " (valid options: NONE, INFO, DEBUG)";
     g_error_collector.addError(os.str());
-    return LogLevel::None;  // Return default value
+    return LogLevel::None;
 }
 
-static int toDepth(const std::string& prec) {
+static std::optional<int> toDepth(const std::string& prec) {
     const auto supportedPrecisionStrings = std::vector<std::string>{"FP32", "FP16", "U8", "I32", "I64"};
 
     const auto precisionStringToDepthMap = std::map<std::string, int>{
@@ -128,9 +131,9 @@ static int toDepth(const std::string& prec) {
         {"I64", CV_32S},
     };
 
-    if (std::find(supportedPrecisionStrings.begin(), supportedPrecisionStrings.end(), prec) !=
-        supportedPrecisionStrings.end()) {
-        return precisionStringToDepthMap.at(prec);
+    auto it = precisionStringToDepthMap.find(prec);
+    if (it != precisionStringToDepthMap.end()) {
+        return it->second;
     }
 
     std::ostringstream validOptions;
@@ -141,29 +144,40 @@ static int toDepth(const std::string& prec) {
     const std::string validOptionsStr = validOptions.str().substr(0, validOptions.str().size() - 2);
 
     g_error_collector.addError("Unsupported precision type: " + prec + " (valid options: " + validOptionsStr + ")");
-
-    return CV_32F;  // Return default value
+    return std::nullopt;
 }
 
-static AttrMap<int> toDepth(const AttrMap<std::string>& attrmap) {
+static std::optional<AttrMap<int>> toDepth(const AttrMap<std::string>& attrmap) {
     AttrMap<int> depthmap;
     for (const auto& [name, str_depth] : attrmap) {
-        depthmap.emplace(name, toDepth(str_depth));
+        auto depth = toDepth(str_depth);
+        if (!depth) {
+            return std::nullopt;
+        }
+        depthmap.emplace(name, *depth);
     }
     return depthmap;
 }
 
-static LayerVariantAttr<int> toDepth(const LayerVariantAttr<std::string>& attr) {
+static std::optional<LayerVariantAttr<int>> toDepth(const LayerVariantAttr<std::string>& attr) {
     LayerVariantAttr<int> depthattr;
     if (std::holds_alternative<std::string>(attr)) {
-        depthattr = toDepth(std::get<std::string>(attr));
+        auto depth = toDepth(std::get<std::string>(attr));
+        if (!depth) {
+            return std::nullopt;
+        }
+        depthattr = *depth;
     } else {
-        depthattr = toDepth(std::get<AttrMap<std::string>>(attr));
+        auto depth = toDepth(std::get<AttrMap<std::string>>(attr));
+        if (!depth) {
+            return std::nullopt;
+        }
+        depthattr = *depth;
     }
     return depthattr;
 }
 
-static std::string toPriority(const std::string& priority) {
+static std::optional<std::string> toPriority(const std::string& priority) {
     if (priority == "LOW") {
         return "LOW";
     }
@@ -173,8 +187,9 @@ static std::string toPriority(const std::string& priority) {
     if (priority == "HIGH") {
         return "HIGH";
     }
+
     g_error_collector.addError("Unsupported model priority: " + priority + " (valid options: LOW, NORMAL, HIGH)");
-    return "MEDIUM";  // Return default value
+    return std::nullopt;
 }
 
 static ScenarioGraph buildGraph(const std::vector<OpDesc>& op_descs,
@@ -239,12 +254,11 @@ struct convert<UniformGenerator::Ptr> {
     static bool decode(const Node& node, UniformGenerator::Ptr& generator) {
         if (!node["low"]) {
             g_error_collector.addError("Uniform distribution must have \"low\" attribute");
-            return false;
         }
         if (!node["high"]) {
             g_error_collector.addError("Uniform distribution must have \"high\" attribute");
-            return false;
         }
+
         int seed = node["seed"] ? node["seed"].as<int>() : 0xffffffff;
         generator = std::make_shared<UniformGenerator>(node["low"].as<double>(), node["high"].as<double>(), seed);
         return true;
@@ -256,7 +270,6 @@ struct convert<IRandomGenerator::Ptr> {
     static bool decode(const Node& node, IRandomGenerator::Ptr& generator) {
         if (!node["dist"]) {
             g_error_collector.addError("\"random\" must have \"dist\" attribute!");
-            return false;
         }
         const auto dist = node["dist"].as<std::string>();
         if (dist == "uniform") {
@@ -265,7 +278,6 @@ struct convert<IRandomGenerator::Ptr> {
             std::ostringstream os;
             os << "Unsupported random distribution: \"" << dist << "\" (valid options: uniform)";
             g_error_collector.addError(os.str());
-            return false;
         }
         return true;
     }
@@ -396,11 +408,15 @@ struct convert<OpenVINOParams> {
         }
 
         if (node["ip"]) {
-            params.input_precision = toDepth(node["ip"].as<LayerVariantAttr<std::string>>());
+            if (auto precision = toDepth(node["ip"].as<LayerVariantAttr<std::string>>())) {
+                params.input_precision = *precision;
+            }
         }
 
         if (node["op"]) {
-            params.output_precision = toDepth(node["op"].as<LayerVariantAttr<std::string>>());
+            if (auto precision = toDepth(node["op"].as<LayerVariantAttr<std::string>>())) {
+                params.output_precision = *precision;
+            }
         }
 
         if (node["il"]) {
@@ -429,7 +445,9 @@ struct convert<OpenVINOParams> {
 
         // NB: Note, it should be handled after "config" is set above
         if (node["priority"]) {
-            params.config.emplace("MODEL_PRIORITY", toPriority(node["priority"].as<std::string>()));
+            if (auto priority = toPriority(node["priority"].as<std::string>())) {
+                params.config.emplace("MODEL_PRIORITY", *priority);
+            }
         }
 
         if (node["clamp_outputs"]) {
@@ -986,12 +1004,12 @@ Config parseConfig(const YAML::Node& node, const ReplaceBy& replace_by) {
     // Check if any errors were collected during parsing
     if (g_error_collector.hasErrors()) {
         std::ostringstream error_msg;
-        error_msg << "Configuration parsing failed with the following errors:\\n";
+        error_msg << "Configuration parsing failed with the following errors:\n";
         const auto errors = g_error_collector.getErrors();
         for (size_t i = 0; i < errors.size(); ++i) {
-            error_msg << "  " << (i + 1) << ". " << errors[i] << "\\n";
+            error_msg << "  " << (i + 1) << ". " << errors[i] << "\n";
         }
-        error_msg << "\\nTotal errors: " << errors.size();
+        error_msg << "\nTotal errors: " << errors.size();
         THROW_ERROR(error_msg.str());
     }
 
