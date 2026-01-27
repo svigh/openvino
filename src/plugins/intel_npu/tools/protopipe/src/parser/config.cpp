@@ -259,8 +259,12 @@ struct convert<UniformGenerator::Ptr> {
             g_error_collector.addError("Uniform distribution must have \"high\" attribute");
         }
 
+        double low = node["low"] ? node["low"].as<double>() : 0.0;
+        double high = node["high"] ? node["high"].as<double>() : 1.0;
         int seed = node["seed"] ? node["seed"].as<int>() : 0xffffffff;
-        generator = std::make_shared<UniformGenerator>(node["low"].as<double>(), node["high"].as<double>(), seed);
+
+        generator = std::make_shared<UniformGenerator>(low, high, seed);
+
         return true;
     }
 };
@@ -268,17 +272,28 @@ struct convert<UniformGenerator::Ptr> {
 template <>
 struct convert<IRandomGenerator::Ptr> {
     static bool decode(const Node& node, IRandomGenerator::Ptr& generator) {
+        const auto supportedDistributions = ["uniform"];
+
+        std::ostringstream validOptions;
+        for (const auto& s : supportedDistributions) {
+            validOptions << s << ", ";
+        }
+
+        const std::string validOptionsStr = validOptions.str().substr(0, validOptions.str().size() - 2);
+
         if (!node["dist"]) {
             g_error_collector.addError("\"random\" must have \"dist\" attribute!");
+            return true;
         }
+
         const auto dist = node["dist"].as<std::string>();
-        if (dist == "uniform") {
+
+        if (std::find(supportedDistributions.begin(), supportedDistributions.end(), dist) == supportedDistributions.end()) {
             generator = node.as<UniformGenerator::Ptr>();
         } else {
-            std::ostringstream os;
-            os << "Unsupported random distribution: \"" << dist << "\" (valid options: uniform)";
-            g_error_collector.addError(os.str());
+            g_error_collector.addError("Unsupported random distribution: \"" + dist + "\" (valid options: " + validOptionsStr + ")");
         }
+
         return true;
     }
 };
@@ -289,10 +304,11 @@ struct convert<Norm::Ptr> {
         // NB: If bigger than tolerance - fail.
         if (!node["tolerance"]) {
             g_error_collector.addError("Metric \"norm\" must have \"tolerance\" attribute!");
-            return false;
         }
+
         const auto tolerance = node["tolerance"].as<double>();
         metric = std::make_shared<Norm>(tolerance);
+
         return true;
     }
 };
@@ -328,6 +344,10 @@ struct convert<NRMSE::Ptr> {
 template <>
 struct convert<IAccuracyMetric::Ptr> {
     static bool decode(const Node& node, IAccuracyMetric::Ptr& metric) {
+        if (!node["name"]) {
+            g_error_collector.addError("Accuracy metric must have \"name\" attribute");
+            return false;
+        }
         const auto type = node["name"].as<std::string>();
         if (type == "norm") {
             metric = node.as<Norm::Ptr>();
@@ -389,6 +409,10 @@ template <>
 struct convert<OpenVINOParams> {
     static bool decode(const Node& node, OpenVINOParams& params) {
         // FIXME: Worth to separate these two
+        if (!node["name"] && !node["path"]) {
+            g_error_collector.addError("Model must have either \"name\" or \"path\" attribute");
+            return false;
+        }
         const auto name = node["name"] ? node["name"].as<std::string>() : node["path"].as<std::string>();
         fs::path path{name};
         if (path.extension() == ".xml") {
@@ -483,6 +507,10 @@ struct convert<ONNXRTParams::OpenVINO> {
 template <>
 struct convert<ONNXRTParams::EP> {
     static bool decode(const Node& node, ONNXRTParams::EP& ep) {
+        if (!node["name"]) {
+            g_error_collector.addError("Execution provider (ep) must have \"name\" attribute");
+            return false;
+        }
         const auto ep_name = node["name"].as<std::string>();
         if (ep_name == "OV") {
             ep = node.as<ONNXRTParams::OpenVINO>();
@@ -500,6 +528,10 @@ template <>
 struct convert<ONNXRTParams> {
     static bool decode(const Node& node, ONNXRTParams& params) {
         // FIXME: Worth to separate these two
+        if (!node["name"] && !node["path"]) {
+            g_error_collector.addError("Model must have either \"name\" or \"path\" attribute");
+            return false;
+        }
         params.model_path = node["name"] ? node["name"].as<std::string>() : node["path"].as<std::string>();
         if (node["session_options"]) {
             params.session_options = node["session_options"].as<std::map<std::string, std::string>>();
@@ -519,6 +551,10 @@ struct convert<Network> {
     static bool decode(const Node& node, Network& network) {
         // NB: Take path stem as network tag
         // Note that at this point, it's fine if names aren't unique
+        if (!node["name"]) {
+            g_error_collector.addError("Network must have \"name\" attribute");
+            return false;
+        }
         const auto name = node["name"].as<std::string>();
         network.tag = std::filesystem::path{name}.stem().string();
         // NB: OpenVINO is default to keep back compatibility for config syntax
